@@ -5,8 +5,8 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
-    style::{Modifier, Style, Stylize},
-    text::Line,
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
     widgets::{Block, Cell, Paragraph, Row, Table},
     Frame,
 };
@@ -24,6 +24,9 @@ struct App {
     date: NaiveDate,
     summary: Option<db::DaySummary>,
     app_summaries: Vec<db::AppSummary>,
+    expanded_app: Option<usize>,
+    expanded_pages: Vec<db::AppSummary>,
+    selected: usize,
     db: db::Database,
 }
 
@@ -35,6 +38,9 @@ impl App {
             date,
             summary: None,
             app_summaries: vec![],
+            expanded_app: None,
+            expanded_pages: vec![],
+            selected: 0,
             db,
         };
         app.refresh();
@@ -48,6 +54,59 @@ impl App {
             .db
             .get_app_summary_for_range(&from, &to)
             .unwrap_or_default();
+        self.expanded_app = None;
+        self.expanded_pages = vec![];
+        self.selected = 0;
+    }
+
+    fn row_count(&self) -> usize {
+        let base = self.app_summaries.len();
+        if self.expanded_app.is_some() {
+            base + self.expanded_pages.len()
+        } else {
+            base
+        }
+    }
+
+    fn app_collapsed_at(&self, app_idx: usize) -> usize {
+        app_idx
+    }
+
+    fn expanded_offset(&self) -> usize {
+        // pages start right after the app row
+        self.expanded_app.map_or(0, |i| i + 1)
+    }
+
+    fn row_to_app_idx(&self, row: usize) -> Option<usize> {
+        if let Some(exp) = self.expanded_app {
+            if row < exp + 1 {
+                // before expanded app → same index
+                Some(row)
+            } else if row < exp + 1 + self.expanded_pages.len() {
+                // this is a page row
+                None
+            } else {
+                // after expanded app → offset by page count
+                Some(row - self.expanded_pages.len())
+            }
+        } else {
+            Some(row)
+        }
+    }
+
+    fn toggle_expand(&mut self, app_idx: usize) {
+        if self.expanded_app == Some(app_idx) {
+            self.expanded_app = None;
+            self.expanded_pages = vec![];
+        } else {
+            let (from, to) = self.date_range();
+            let app_class = &self.app_summaries[app_idx].app_class;
+            self.expanded_pages = self
+                .db
+                .get_page_summary_for_app(&from, &to, app_class)
+                .unwrap_or_default();
+            self.expanded_app = Some(app_idx);
+        }
     }
 
     fn date_range(&self) -> (String, String) {
@@ -100,6 +159,30 @@ fn format_duration(ms: i64) -> String {
     format!("{hours:02}:{minutes:02}:{secs:02}")
 }
 
+fn clean_page_title(title: &str) -> String {
+    let suffixes = [
+        " — Mozilla Firefox",
+        " - Mozilla Firefox",
+        " — Chromium",
+        " - Chromium",
+        " — Google Chrome",
+        " - Google Chrome",
+        " — Brave",
+        " - Brave",
+        " — Vivaldi",
+        " - Vivaldi",
+        " — Opera",
+        " - Opera",
+    ];
+    let t = title.trim();
+    for s in &suffixes {
+        if let Some(base) = t.strip_suffix(s) {
+            return base.trim().to_string();
+        }
+    }
+    t.to_string()
+}
+
 fn mode_index(mode: ViewMode) -> usize {
     match mode {
         ViewMode::Day => 0,
@@ -108,9 +191,16 @@ fn mode_index(mode: ViewMode) -> usize {
     }
 }
 
+// ── colours ──
+const ACCENT: Color = Color::Cyan;
+const DIM: Color = Color::DarkGray;
+const ROW_SEL: Color = Color::Rgb(30, 40, 55);
+const PAGE_FG: Color = Color::Rgb(160, 160, 180);
+
+// ── drawing ──
+
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(5),
@@ -119,6 +209,14 @@ fn draw(frame: &mut Frame, app: &App) {
     ])
     .split(area);
 
+    draw_header(frame, chunks[0], app);
+    draw_summary(frame, chunks[1], app);
+    draw_table(frame, chunks[2], app);
+    draw_footer(frame, chunks[3], app);
+}
+
+fn draw_header(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(30)]).split(area);
     let (from, to) = app.date_range();
     let range_label = match app.mode {
         ViewMode::Day => from.clone(),
@@ -128,9 +226,6 @@ fn draw(frame: &mut Frame, app: &App) {
         }
         ViewMode::Month => app.date.format("%Y-%m").to_string(),
     };
-
-    // top bar: title + tabs
-    let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(30)]).split(chunks[0]);
     frame.render_widget(
         Paragraph::new(Line::from(format!(" SELFTrack  {range_label} "))).bold(),
         top[0],
@@ -149,8 +244,9 @@ fn draw(frame: &mut Frame, app: &App) {
         .collect::<Vec<_>>()
         .join(" ");
     frame.render_widget(Paragraph::new(tabs), top[1]);
+}
 
-    // summary block
+fn draw_summary(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let summary_text = match &app.summary {
         Some(s) => vec![
             Line::from(format!(" PC on:  {}", format_duration(s.pc_on_ms))),
@@ -162,27 +258,91 @@ fn draw(frame: &mut Frame, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(summary_text).block(Block::bordered().title(" Summary ")),
-        chunks[1],
+        area,
     );
+}
 
-    // app table
+fn draw_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let active_ms = app.summary.as_ref().map(|s| s.active_ms).unwrap_or(0);
-    let rows: Vec<Row> = app
-        .app_summaries
-        .iter()
-        .map(|a| {
-            let pct = if active_ms > 0 {
-                (a.total_ms as f64 / active_ms as f64) * 100.0
-            } else {
-                0.0
-            };
+
+    let mut rows: Vec<Row> = Vec::new();
+    for (app_idx, a) in app.app_summaries.iter().enumerate() {
+        let pct = if active_ms > 0 {
+            (a.total_ms as f64 / active_ms as f64) * 100.0
+        } else {
+            0.0
+        };
+        let is_expanded = app.expanded_app == Some(app_idx);
+        let prefix = if is_expanded { "▾ " } else { "▸ " };
+        let row_sel = app.selected == rows.len();
+
+        rows.push(
             Row::new(vec![
-                Cell::from(a.app_class.as_str()),
-                Cell::from(format_duration(a.total_ms)),
-                Cell::from(format!("{pct:5.1}%")),
+                Cell::from(Span::styled(
+                    format!("{prefix}{}", a.app_class),
+                    if row_sel {
+                        Style::new().fg(Color::White).bold()
+                    } else {
+                        Style::new().fg(Color::White)
+                    },
+                )),
+                Cell::from(Span::styled(
+                    format_duration(a.total_ms),
+                    if row_sel {
+                        Style::new().fg(Color::White).bold()
+                    } else {
+                        Style::new().fg(Color::White)
+                    },
+                )),
+                Cell::from(Span::styled(
+                    format!("{pct:5.1}%"),
+                    Style::new().fg(Color::White),
+                )),
             ])
-        })
-        .collect();
+            .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+        );
+
+        // expanded pages
+        if is_expanded {
+            for (pg_idx, p) in app.expanded_pages.iter().enumerate() {
+                let page_pct = if a.total_ms > 0 {
+                    (p.total_ms as f64 / a.total_ms as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let row_sel = app.selected == rows.len();
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(Span::styled(
+                            format!("  └ {}", truncate(&clean_page_title(&p.app_class), 30)),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(PAGE_FG)
+                            },
+                        )),
+                        Cell::from(Span::styled(
+                            format_duration(p.total_ms),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(PAGE_FG)
+                            },
+                        )),
+                        Cell::from(Span::styled(
+                            format!("{page_pct:5.1}%"),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(DIM)
+                            },
+                        )),
+                    ])
+                    .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+                );
+            }
+        }
+    }
 
     let widths = [
         Constraint::Percentage(55),
@@ -196,16 +356,29 @@ fn draw(frame: &mut Frame, app: &App) {
         )
         .block(Block::bordered().title(" Applications "));
 
-    frame.render_widget(table, chunks[2]);
+    frame.render_widget(table, area);
+}
 
-    // footer
+fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let mode_hint = if app.app_summaries.is_empty() {
+        "".to_string()
+    } else {
+        format!(
+            " {}/{}  ",
+            app.selected + 1,
+            app.row_count()
+        )
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(
-            " ← → navigate period  |  Tab / 1 2 3 switch view  |  q quit ",
-        )),
-        chunks[3],
+        Paragraph::new(Line::from(format!(
+            " {}← → period  |  Tab / 1 2 3 view  |  ↑↓ select  |  Enter expand  |  q quit",
+            mode_hint,
+        ))),
+        area,
     );
 }
+
+// ── public entry point ──
 
 pub fn run(db: db::Database) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
@@ -247,6 +420,32 @@ pub fn run(db: db::Database) -> io::Result<()> {
                             ViewMode::Month => ViewMode::Day,
                         };
                         app.refresh();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if app.selected > 0 {
+                            app.selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let max = app.row_count().saturating_sub(1);
+                        if app.selected < max {
+                            app.selected += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(app_idx) = app.row_to_app_idx(app.selected) {
+                            if app_idx < app.app_summaries.len() {
+                                let prev = app.expanded_app;
+                                app.toggle_expand(app_idx);
+                                // adjust selected if collapsing before current position
+                                if prev.is_some() && app.expanded_app.is_none() {
+                                    let pg_count = app.expanded_pages.len();
+                                    if app.selected > app_idx && app.selected <= app_idx + pg_count {
+                                        app.selected = app_idx + 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
                         let prev = match app.mode {
@@ -313,4 +512,15 @@ fn last_day(year: i32, month: u32) -> u32 {
     .pred_opt()
     .unwrap()
     .day()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max.saturating_sub(1);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }

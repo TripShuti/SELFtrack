@@ -189,6 +189,53 @@ impl Database {
         rows.collect()
     }
 
+    pub fn get_page_summary_for_app(
+        &self, from: &str, to: &str, app_class: &str,
+    ) -> Result<Vec<AppSummary>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT app_title, SUM(end_ms - start_ms) as total_ms
+             FROM sessions
+             WHERE date >= ?1 AND date <= ?2 AND app_class = ?3 AND is_idle = 0
+             GROUP BY app_title ORDER BY total_ms DESC"
+        )?;
+        let rows = stmt.query_map(params![from, to, app_class], |row| {
+            Ok(AppSummary {
+                app_class: row.get(0)?,
+                total_ms: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_sessions_for_range(&self, from: &str, to: &str) -> Result<Vec<Session>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT date, app_class, app_title, start_ms, end_ms, is_idle
+             FROM sessions WHERE date >= ?1 AND date <= ?2 ORDER BY start_ms"
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok(Session {
+                date: row.get(0)?,
+                app_class: row.get(1)?,
+                app_title: row.get(2)?,
+                start_ms: row.get(3)?,
+                end_ms: row.get(4)?,
+                is_idle: row.get::<_, i32>(5)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_available_dates(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT date FROM sessions ORDER BY date DESC"
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn delete_sessions_for_date(&self, date: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE date = ?1", params![date])?;

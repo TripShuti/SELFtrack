@@ -32,6 +32,7 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
             Some(ev) = hypr_rx.recv() => {
                 match ev {
                     HyprEvent::ActiveWindow { class, title } => {
+                        tracing::info!("activewindow: {class} / {title}");
                         let now = idle::current_time_ms();
                         finalize_session(&db, &state, now, is_idle);
                         state = TrackerState {

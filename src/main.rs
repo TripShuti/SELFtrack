@@ -25,8 +25,14 @@ enum Commands {
     Report {
         #[arg(short, long)]
         date: Option<String>,
+        #[arg(short, long)]
+        app: Option<String>,
     },
     Today,
+    Timeline {
+        #[arg(short, long)]
+        date: Option<String>,
+    },
     Tui,
 }
 
@@ -60,17 +66,23 @@ async fn main() {
             );
             daemon::run(db, idle_threshold).await;
         }
-        Commands::Report { date } => {
+        Commands::Report { date, app } => {
             let date = date.unwrap_or_else(today);
             let path = db_path();
             let db = db::Database::open(&path).expect("failed to open database");
-            report::print_report(&db, &date);
+            report::print_report(&db, &date, app.as_deref());
         }
         Commands::Today => {
             let date = today();
             let path = db_path();
             let db = db::Database::open(&path).expect("failed to open database");
-            report::print_report(&db, &date);
+            report::print_report(&db, &date, None);
+        }
+        Commands::Timeline { date } => {
+            let date = date.unwrap_or_else(today);
+            let path = db_path();
+            let db = db::Database::open(&path).expect("failed to open database");
+            report::print_timeline(&db, &date);
         }
         Commands::Tui => {
             let path = db_path();
