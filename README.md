@@ -11,26 +11,6 @@ Focus-based time tracker for Hyprland. Logs active application time per day usin
 - TUI: calendar view with day/week/month totals + expandable app pages
 - CLI: report, per-app page breakdown, timeline
 
-## Screenshot
-
-```
-◆ SELFTrack  ◀ 2026/07 ▶
-
-┌─ Calendar ───────────┐ ┌─ 2026-07-25 (Sat) ────────┐
-│ Mon Tue Wed Thu Fri...│ │ Day    00:16:20             │
-│              1  2  3  │ │ Active 00:16:09             │
-│  4  5  6  7  8  9 10  │ │ Idle   00:00:10             │
-│ 11 12 13 14 15 16 17  │ │ Week   00:45:30  (W30)     │
-│ 18 19 20 21 22 23 24  │ │ Month  02:15:00  (2026-07) │
-│ 25 26 27 28 29 30 31  │ └────────────────────────────┘
-└───────────────────────┘
-┌─ Applications ───────────────────────────────────────┐
-│ App                       Time         %               │
-│ ▸ kitty                00:14:45    91.3%              │
-│ ▸ chromium             00:01:23     8.6%              │
-└───────────────────────────────────────────────────────┘
-```
-
 ## Installation
 
 ```bash
