@@ -234,18 +234,6 @@ fn format_duration(ms: i64) -> String {
     format!("{hours:02}:{minutes:02}:{secs:02}")
 }
 
-fn format_duration_short(ms: i64) -> String {
-    // "2h 15m" or "45m" or "0m"
-    let total_secs = ms / 1000;
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else {
-        format!("{minutes}m")
-    }
-}
-
 fn clean_page_title(title: &str) -> String {
     let suffixes = [
         " — Mozilla Firefox",
@@ -295,14 +283,7 @@ fn last_day_of(year: i32, month: u32) -> u32 {
 
 // ── colours ──
 
-const ACCENT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
-const ROW_SEL: Color = Color::Rgb(30, 40, 55);
-const PAGE_FG: Color = Color::Rgb(160, 160, 180);
-const CAL_HI: Color = Color::Rgb(50, 180, 80);
-const CAL_MED: Color = Color::Rgb(40, 130, 60);
-const CAL_LOW: Color = Color::Rgb(30, 80, 40);
-const TODAY_BG: Color = Color::Rgb(40, 30, 20);
+
 
 // ── drawing ──
 
@@ -310,11 +291,10 @@ fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     if app.mode == ViewMode::Calendar {
-        // calendar mode: header + calendar grid + detail
         let [top_bar, cal_area, summary_area, table_area, footer] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(9),
-            Constraint::Length(3),
+            Constraint::Length(8),
+            Constraint::Length(5),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
@@ -345,37 +325,50 @@ fn draw(frame: &mut Frame, app: &App) {
 // ── calendar view ──
 
 fn draw_cal_header(frame: &mut Frame, area: Rect, app: &App) {
-    let left = Line::from(vec![
-        Span::styled(" ◆ SELFTrack ", Style::new().fg(ACCENT).bold()),
-    ]);
-    let right = Line::from(vec![
-        Span::styled(" \u{25c0} ", Style::new().fg(ACCENT)),
-        Span::styled(
-            app.cal_month.format("%Y/%m").to_string(),
-            Style::new().fg(Color::White),
-        ),
-        Span::styled(" \u{25b6} ", Style::new().fg(ACCENT)),
-    ]);
-    let halves: [Rect; 2] = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).areas(area);
-    frame.render_widget(Paragraph::new(left), halves[0]);
-    frame.render_widget(Paragraph::new(right), halves[1]);
+    let halves: [Rect; 2] = Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" SELFTrack  "),
+            Span::styled("\u{25c0} ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                app.cal_month.format("%Y/%m").to_string(),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" \u{25b6}", Style::new().add_modifier(Modifier::BOLD)),
+        ])),
+        halves[0],
+    );
+    let names = [" Day ", " Week ", " Month ", " Calendar "];
+    let selected = 3;
+    let tabs = names
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if i == selected {
+                format!("\u{25b8}{}\u{25c2}", t.trim())
+            } else {
+                format!(" {} ", t.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    frame.render_widget(Paragraph::new(tabs), halves[1]);
 }
 
 fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
     let days_in_month = last_day_of(app.cal_month.year(), app.cal_month.month());
-    let first_weekday = app.cal_month.weekday().num_days_from_monday() as usize; // 0=Mon
+    let first_weekday = app.cal_month.weekday().num_days_from_monday() as usize;
     let today = chrono::Local::now().naive_local().date();
+    let focus_cal = app.cal_focus == Focus::Calendar;
 
-    // weekday header line
     let header = " Mon Tue Wed Thu Fri Sat Sun ";
 
     let mut lines = vec![
         Line::from(""),
-        Line::styled(header, Style::new().fg(DIM)),
+        Line::styled(header, Style::new().fg(Color::DarkGray)),
     ];
 
     let mut day = 1i32;
-    let mut col = 0usize;
     loop {
         let mut spans = Vec::new();
         for c in 0..7 {
@@ -386,33 +379,24 @@ fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
                 let current = app.cal_month.with_day(d).unwrap();
                 let is_selected = current == app.selected_date();
                 let is_today = current == today;
-                let key = current.format("%Y-%m-%d").to_string();
-                let total = app.day_totals.get(&key);
-                let active_hours = total.map_or(0.0, |t| t.active_ms as f64 / 3600000.0);
+                let has_data = app.day_totals.contains_key(&current.format("%Y-%m-%d").to_string());
 
-                let cell = format!("{:>3} ", d);
+                let marker = if is_today && !is_selected { "*" } else { " " };
+                let cell = format!("{:>2}{} ", d, marker);
 
-                let style = if is_selected {
-                    match app.cal_focus {
-                        Focus::Calendar => Style::new().fg(Color::White).bold().bg(ROW_SEL),
-                        Focus::Detail => Style::new().fg(ACCENT).bold(),
-                    }
+                let style = if is_selected && focus_cal {
+                    Style::new().add_modifier(Modifier::BOLD)
                 } else if is_today {
-                    Style::new().fg(Color::Yellow).bold()
-                } else if active_hours >= 6.0 {
-                    Style::new().fg(CAL_HI).bold()
-                } else if active_hours >= 2.0 {
-                    Style::new().fg(CAL_MED)
-                } else if active_hours > 0.0 {
-                    Style::new().fg(CAL_LOW)
+                    Style::new().add_modifier(Modifier::BOLD)
+                } else if has_data {
+                    Style::new()
                 } else {
-                    Style::new().fg(DIM)
+                    Style::new().fg(Color::DarkGray)
                 };
 
                 spans.push(Span::styled(cell, style));
                 day += 1;
             }
-            col += 1;
         }
         lines.push(Line::from(spans));
         if day > days_in_month as i32 {
@@ -424,33 +408,20 @@ fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_cal_summary(frame: &mut Frame, area: Rect, app: &App) {
-    let text = match &app.summary {
-        Some(s) => {
-            let ds = app.selected_date().format("%Y-%m-%d %a").to_string();
-            vec![Line::from(vec![
-                Span::styled(" \u{2500} ", Style::new().fg(DIM)),
-                Span::styled(ds, Style::new().fg(ACCENT).bold()),
-                Span::styled(
-                    format!(
-                        " \u{2500}  PC on {}  Active {}  Idle {}",
-                        format_duration(s.pc_on_ms),
-                        format_duration(s.active_ms),
-                        format_duration(s.idle_ms),
-                    ),
-                    Style::new().fg(DIM),
-                ),
-            ])]
-        }
-        None => vec![Line::from(vec![
-            Span::styled(" \u{2500} ", Style::new().fg(DIM)),
-            Span::styled(
-                app.selected_date().format("%Y-%m-%d %a").to_string(),
-                Style::new().fg(ACCENT).bold(),
-            ),
-            Span::styled(" \u{2500}  No data", Style::new().fg(DIM)),
-        ])],
+    let ds = app.selected_date().format("%Y-%m-%d %a").to_string();
+    let summary_text = match &app.summary {
+        Some(s) => vec![
+            Line::from(format!(" PC on:  {}", format_duration(s.pc_on_ms))),
+            Line::raw(""),
+            Line::from(format!(" Active: {}", format_duration(s.active_ms))),
+            Line::from(format!(" Idle:   {}", format_duration(s.idle_ms))),
+        ],
+        None => vec![Line::from(" No data")],
     };
-    frame.render_widget(Paragraph::new(text), area);
+    frame.render_widget(
+        Paragraph::new(summary_text).block(Block::bordered().title(format!(" {ds} "))),
+        area,
+    );
 }
 
 fn draw_cal_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -469,28 +440,11 @@ fn draw_cal_table(frame: &mut Frame, area: Rect, app: &App) {
 
         rows.push(
             Row::new(vec![
-                Cell::from(Span::styled(
-                    format!("{prefix}{}", a.app_class),
-                    if row_sel {
-                        Style::new().fg(Color::White).bold()
-                    } else {
-                        Style::new().fg(Color::White)
-                    },
-                )),
-                Cell::from(Span::styled(
-                    format_duration(a.total_ms),
-                    if row_sel {
-                        Style::new().fg(Color::White).bold()
-                    } else {
-                        Style::new().fg(Color::White)
-                    },
-                )),
-                Cell::from(Span::styled(
-                    format!("{pct:5.1}%"),
-                    Style::new().fg(Color::White),
-                )),
+                Cell::from(format!("{prefix}{}", a.app_class)),
+                Cell::from(format_duration(a.total_ms)),
+                Cell::from(format!("{pct:5.1}%")),
             ])
-            .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+            .style(if row_sel { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() }),
         );
 
         if is_expanded {
@@ -503,32 +457,11 @@ fn draw_cal_table(frame: &mut Frame, area: Rect, app: &App) {
                 let row_sel = app.selected == rows.len();
                 rows.push(
                     Row::new(vec![
-                        Cell::from(Span::styled(
-                            format!("  \u{2514} {}", truncate(&clean_page_title(&p.app_class), 30)),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(PAGE_FG)
-                            },
-                        )),
-                        Cell::from(Span::styled(
-                            format_duration(p.total_ms),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(PAGE_FG)
-                            },
-                        )),
-                        Cell::from(Span::styled(
-                            format!("{page_pct:5.1}%"),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(DIM)
-                            },
-                        )),
+                        Cell::from(format!("  \u{2514} {}", truncate(&clean_page_title(&p.app_class), 30))),
+                        Cell::from(format_duration(p.total_ms)),
+                        Cell::from(format!("{page_pct:5.1}%")),
                     ])
-                    .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+                    .style(if row_sel { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() }),
                 );
             }
         }
@@ -543,7 +476,8 @@ fn draw_cal_table(frame: &mut Frame, area: Rect, app: &App) {
         .header(
             Row::new(vec!["App", "Time", "%"])
                 .style(Style::new().add_modifier(Modifier::BOLD)),
-        );
+        )
+        .block(Block::bordered().title(" Applications "));
 
     frame.render_widget(table, area);
 }
@@ -650,10 +584,10 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 )),
                 Cell::from(Span::styled(
                     format!("{pct:5.1}%"),
-                    Style::new().fg(Color::White),
+                    Style::new(),
                 )),
             ])
-            .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+            .style(if row_sel { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() }),
         );
 
         if is_expanded {
@@ -668,30 +602,18 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                     Row::new(vec![
                         Cell::from(Span::styled(
                             format!("  └ {}", truncate(&clean_page_title(&p.app_class), 30)),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(PAGE_FG)
-                            },
+                            Style::new(),
                         )),
                         Cell::from(Span::styled(
                             format_duration(p.total_ms),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(PAGE_FG)
-                            },
+                            Style::new(),
                         )),
                         Cell::from(Span::styled(
                             format!("{page_pct:5.1}%"),
-                            if row_sel {
-                                Style::new().fg(Color::White)
-                            } else {
-                                Style::new().fg(DIM)
-                            },
+                            Style::new(),
                         )),
                     ])
-                    .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+                    .style(if row_sel { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() }),
                 );
             }
         }
