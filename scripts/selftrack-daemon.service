@@ -1,0 +1,11 @@
+[Unit]
+Description=SELFTrack daemon — focus-based time tracker for Hyprland
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/selftrack daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
