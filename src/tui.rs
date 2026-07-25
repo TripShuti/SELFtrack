@@ -244,24 +244,33 @@ fn last_day_of(year: i32, month: u32) -> u32 {
 
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let [top_bar, cal_area, summary_area, table_area, footer] = Layout::vertical([
+    let [top_bar, mid, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(8),
-        Constraint::Length(5),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(area);
 
+    let [cs_area, table_area] = Layout::vertical([
+        Constraint::Length(9),
+        Constraint::Min(0),
+    ])
+    .areas(mid);
+
+    let [cal_area, sum_area] = Layout::horizontal([
+        Constraint::Length(34),
+        Constraint::Min(0),
+    ])
+    .areas(cs_area);
+
     draw_header(frame, top_bar, app);
     draw_cal_grid(frame, cal_area, app);
-    draw_summary(frame, summary_area, app);
+    draw_summary(frame, sum_area, app);
     draw_table(frame, table_area, app);
     draw_footer(frame, footer, app);
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    let halves: [Rect; 2] = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).areas(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" SELFTrack  "),
@@ -272,7 +281,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(" \u{25b6}", Style::new().add_modifier(Modifier::BOLD)),
         ])),
-        halves[0],
+        area,
     );
 }
 
@@ -282,12 +291,9 @@ fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
     let today = chrono::Local::now().naive_local().date();
     let focus_cal = app.focus == Focus::Calendar;
 
-    let header = " Mon Tue Wed Thu Fri Sat Sun ";
+    let wd_header = " Mon Tue Wed Thu Fri Sat Sun ";
 
-    let mut lines = vec![
-        Line::from(""),
-        Line::styled(header, Style::new().fg(ratatui::style::Color::DarkGray)),
-    ];
+    let mut lines = vec![Line::styled(wd_header, Style::new().fg(ratatui::style::Color::DarkGray))];
 
     let mut day = 1i32;
     loop {
@@ -325,7 +331,10 @@ fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Calendar ")),
+        area,
+    );
 }
 
 fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
@@ -335,8 +344,16 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let month = &app.month_summary;
 
     let day_line = match day {
-        Some(s) => format!(" Day    {}  Active  {}  Idle  {}", format_duration(s.pc_on_ms), format_duration(s.active_ms), format_duration(s.idle_ms)),
+        Some(s) => format!(" Day    {}", format_duration(s.pc_on_ms)),
         None => " Day    —".into(),
+    };
+    let active_line = match day {
+        Some(s) => format!(" Active {}", format_duration(s.active_ms)),
+        None => String::new(),
+    };
+    let idle_line = match day {
+        Some(s) => format!(" Idle   {}", format_duration(s.idle_ms)),
+        None => String::new(),
     };
     let week_line = match week {
         Some(s) => {
@@ -352,9 +369,19 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
         None => " Month  —".into(),
     };
 
+    let mut text = vec![];
+    text.push(Line::from(day_line));
+    if !active_line.is_empty() {
+        text.push(Line::from(active_line));
+    }
+    if !idle_line.is_empty() {
+        text.push(Line::from(idle_line));
+    }
+    text.push(Line::from(week_line));
+    text.push(Line::from(month_line));
+
     frame.render_widget(
-        Paragraph::new(vec![Line::from(day_line), Line::from(week_line), Line::from(month_line)])
-            .block(Block::bordered().title(format!(" {ds} "))),
+        Paragraph::new(text).block(Block::bordered().title(format!(" {ds} "))),
         area,
     );
 }
