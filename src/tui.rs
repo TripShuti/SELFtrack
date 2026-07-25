@@ -4,12 +4,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Cell, Paragraph, Row, Table},
     Frame,
 };
+use std::collections::HashMap;
 use std::io;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -17,32 +18,57 @@ enum ViewMode {
     Day,
     Week,
     Month,
+    Calendar,
+}
+
+struct DayTotal {
+    active_ms: i64,
+    idle_ms: i64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    Calendar,
+    Detail,
 }
 
 struct App {
     mode: ViewMode,
+    // shared
     date: NaiveDate,
     summary: Option<db::DaySummary>,
     app_summaries: Vec<db::AppSummary>,
     expanded_app: Option<usize>,
     expanded_pages: Vec<db::AppSummary>,
     selected: usize,
+    // calendar
+    cal_month: NaiveDate,
+    cal_day: u32,
+    day_totals: HashMap<String, DayTotal>,
+    cal_focus: Focus,
     db: db::Database,
 }
 
+// ── App ──
+
 impl App {
     fn new(db: db::Database) -> Self {
-        let date = chrono::Local::now().naive_local().date();
+        let today = chrono::Local::now().naive_local().date();
         let mut app = Self {
-            mode: ViewMode::Day,
-            date,
+            mode: ViewMode::Calendar,
+            date: today,
             summary: None,
             app_summaries: vec![],
             expanded_app: None,
             expanded_pages: vec![],
             selected: 0,
+            cal_month: today.with_day(1).unwrap(),
+            cal_day: today.day(),
+            day_totals: HashMap::new(),
+            cal_focus: Focus::Calendar,
             db,
         };
+        app.refresh_calendar();
         app.refresh();
         app
     }
@@ -59,6 +85,71 @@ impl App {
         self.selected = 0;
     }
 
+    fn refresh_calendar(&mut self) {
+        let first = self.cal_month;
+        let last = last_day_of(first.year(), first.month());
+        let last_date = first.with_day(last).unwrap();
+        let from = first.format("%Y-%m-%d").to_string();
+        let to = last_date.format("%Y-%m-%d").to_string();
+        self.day_totals.clear();
+        if let Ok(sessions) = self.db.get_sessions_for_range(&from, &to) {
+            for s in &sessions {
+                let dt = self
+                    .day_totals
+                    .entry(s.date.clone())
+                    .or_insert(DayTotal {
+                        active_ms: 0,
+                        idle_ms: 0,
+                    });
+                if s.is_idle {
+                    dt.idle_ms += s.end_ms - s.start_ms;
+                } else {
+                    dt.active_ms += s.end_ms - s.start_ms;
+                }
+            }
+        }
+        self.refresh_day();
+    }
+
+    fn refresh_day(&mut self) {
+        if let Some(d) = self.cal_month.with_day(self.cal_day) {
+            let ds = d.format("%Y-%m-%d").to_string();
+            self.summary = self.db.get_summary_for_range(&ds, &ds).ok();
+            self.app_summaries = self
+                .db
+                .get_app_summary_for_range(&ds, &ds)
+                .unwrap_or_default();
+            self.expanded_app = None;
+            self.expanded_pages = vec![];
+            self.selected = 0;
+        }
+    }
+
+    fn selected_date(&self) -> NaiveDate {
+        self.cal_month.with_day(self.cal_day).unwrap()
+    }
+
+    fn move_selection(&mut self, delta_days: i64) {
+        let current = self.selected_date();
+        let new = if delta_days >= 0 {
+            current.checked_add_days(chrono::Days::new(delta_days as u64))
+        } else {
+            current.checked_sub_days(chrono::Days::new((-delta_days) as u64))
+        };
+        if let Some(new) = new {
+            let changed_month = new.month() != self.cal_month.month()
+                || new.year() != self.cal_month.year();
+            if changed_month {
+                self.cal_month = NaiveDate::from_ymd_opt(new.year(), new.month(), 1).unwrap();
+                self.cal_day = new.day();
+                self.refresh_calendar();
+            } else {
+                self.cal_day = new.day();
+                self.refresh_day();
+            }
+        }
+    }
+
     fn row_count(&self) -> usize {
         let base = self.app_summaries.len();
         if self.expanded_app.is_some() {
@@ -68,25 +159,13 @@ impl App {
         }
     }
 
-    fn app_collapsed_at(&self, app_idx: usize) -> usize {
-        app_idx
-    }
-
-    fn expanded_offset(&self) -> usize {
-        // pages start right after the app row
-        self.expanded_app.map_or(0, |i| i + 1)
-    }
-
     fn row_to_app_idx(&self, row: usize) -> Option<usize> {
         if let Some(exp) = self.expanded_app {
             if row < exp + 1 {
-                // before expanded app → same index
                 Some(row)
             } else if row < exp + 1 + self.expanded_pages.len() {
-                // this is a page row
                 None
             } else {
-                // after expanded app → offset by page count
                 Some(row - self.expanded_pages.len())
             }
         } else {
@@ -99,7 +178,13 @@ impl App {
             self.expanded_app = None;
             self.expanded_pages = vec![];
         } else {
-            let (from, to) = self.date_range();
+            let (from, to) = match self.mode {
+                ViewMode::Calendar => {
+                    let d = self.selected_date().format("%Y-%m-%d").to_string();
+                    (d.clone(), d)
+                }
+                _ => self.date_range(),
+            };
             let app_class = &self.app_summaries[app_idx].app_class;
             self.expanded_pages = self
                 .db
@@ -111,7 +196,7 @@ impl App {
 
     fn date_range(&self) -> (String, String) {
         match self.mode {
-            ViewMode::Day => {
+            ViewMode::Day | ViewMode::Calendar => {
                 let d = self.date.format("%Y-%m-%d").to_string();
                 (d.clone(), d)
             }
@@ -131,25 +216,15 @@ impl App {
             }
             ViewMode::Month => {
                 let first = self.date.with_day(1).unwrap();
-                let last = if self.date.month() == 12 {
-                    NaiveDate::from_ymd_opt(self.date.year() + 1, 1, 1)
-                        .unwrap()
-                        .pred_opt()
-                        .unwrap()
-                } else {
-                    NaiveDate::from_ymd_opt(self.date.year(), self.date.month() + 1, 1)
-                        .unwrap()
-                        .pred_opt()
-                        .unwrap()
-                };
-                (
-                    first.format("%Y-%m-%d").to_string(),
-                    last.format("%Y-%m-%d").to_string(),
-                )
+                let last = last_day_of(self.date.year(), self.date.month());
+                let last_date = NaiveDate::from_ymd_opt(self.date.year(), self.date.month(), last).unwrap();
+                (first.format("%Y-%m-%d").to_string(), last_date.format("%Y-%m-%d").to_string())
             }
         }
     }
 }
+
+// ── helpers ──
 
 fn format_duration(ms: i64) -> String {
     let total_secs = ms / 1000;
@@ -157,6 +232,18 @@ fn format_duration(ms: i64) -> String {
     let minutes = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
     format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+fn format_duration_short(ms: i64) -> String {
+    // "2h 15m" or "45m" or "0m"
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else {
+        format!("{minutes}m")
+    }
 }
 
 fn clean_page_title(title: &str) -> String {
@@ -183,86 +270,190 @@ fn clean_page_title(title: &str) -> String {
     t.to_string()
 }
 
-fn mode_index(mode: ViewMode) -> usize {
-    match mode {
-        ViewMode::Day => 0,
-        ViewMode::Week => 1,
-        ViewMode::Month => 2,
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
     }
+    let mut end = max.saturating_sub(1);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn last_day_of(year: i32, month: u32) -> u32 {
+    NaiveDate::from_ymd_opt(
+        if month == 12 { year + 1 } else { year },
+        if month == 12 { 1 } else { month + 1 },
+        1,
+    )
+    .unwrap()
+    .pred_opt()
+    .unwrap()
+    .day()
 }
 
 // ── colours ──
+
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 const ROW_SEL: Color = Color::Rgb(30, 40, 55);
 const PAGE_FG: Color = Color::Rgb(160, 160, 180);
+const CAL_HI: Color = Color::Rgb(50, 180, 80);
+const CAL_MED: Color = Color::Rgb(40, 130, 60);
+const CAL_LOW: Color = Color::Rgb(30, 80, 40);
+const TODAY_BG: Color = Color::Rgb(40, 30, 20);
 
 // ── drawing ──
 
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(5),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .split(area);
 
-    draw_header(frame, chunks[0], app);
-    draw_summary(frame, chunks[1], app);
-    draw_table(frame, chunks[2], app);
-    draw_footer(frame, chunks[3], app);
+    if app.mode == ViewMode::Calendar {
+        // calendar mode: header + calendar grid + detail
+        let [top_bar, cal_area, summary_area, table_area, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(9),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+
+        draw_cal_header(frame, top_bar, app);
+        draw_cal_grid(frame, cal_area, app);
+        draw_cal_summary(frame, summary_area, app);
+        draw_cal_table(frame, table_area, app);
+        draw_cal_footer(frame, footer, app);
+    } else {
+        // day/week/month aggregate views
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+        draw_header(frame, chunks[0], app);
+        draw_summary(frame, chunks[1], app);
+        draw_table(frame, chunks[2], app);
+        draw_footer(frame, chunks[3]);
+    }
 }
 
-fn draw_header(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(30)]).split(area);
-    let (from, to) = app.date_range();
-    let range_label = match app.mode {
-        ViewMode::Day => from.clone(),
-        ViewMode::Week => {
-            let wn = app.date.iso_week().week();
-            format!("W{wn} ({from} — {to})")
-        }
-        ViewMode::Month => app.date.format("%Y-%m").to_string(),
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(format!(" SELFTrack  {range_label} "))).bold(),
-        top[0],
-    );
-    let selected = mode_index(app.mode);
-    let tabs = [" Day ", " Week ", " Month "]
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            if i == selected {
-                format!("▸{}◂", t.trim())
+// ── calendar view ──
+
+fn draw_cal_header(frame: &mut Frame, area: Rect, app: &App) {
+    let left = Line::from(vec![
+        Span::styled(" ◆ SELFTrack ", Style::new().fg(ACCENT).bold()),
+    ]);
+    let right = Line::from(vec![
+        Span::styled(" \u{25c0} ", Style::new().fg(ACCENT)),
+        Span::styled(
+            app.cal_month.format("%Y/%m").to_string(),
+            Style::new().fg(Color::White),
+        ),
+        Span::styled(" \u{25b6} ", Style::new().fg(ACCENT)),
+    ]);
+    let halves: [Rect; 2] = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).areas(area);
+    frame.render_widget(Paragraph::new(left), halves[0]);
+    frame.render_widget(Paragraph::new(right), halves[1]);
+}
+
+fn draw_cal_grid(frame: &mut Frame, area: Rect, app: &App) {
+    let days_in_month = last_day_of(app.cal_month.year(), app.cal_month.month());
+    let first_weekday = app.cal_month.weekday().num_days_from_monday() as usize; // 0=Mon
+    let today = chrono::Local::now().naive_local().date();
+
+    // weekday header line
+    let header = " Mon Tue Wed Thu Fri Sat Sun ";
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::styled(header, Style::new().fg(DIM)),
+    ];
+
+    let mut day = 1i32;
+    let mut col = 0usize;
+    loop {
+        let mut spans = Vec::new();
+        for c in 0..7 {
+            if (day == 1 && c < first_weekday) || day > days_in_month as i32 {
+                spans.push(Span::raw("    "));
             } else {
-                format!(" {} ", t.trim())
+                let d = day as u32;
+                let current = app.cal_month.with_day(d).unwrap();
+                let is_selected = current == app.selected_date();
+                let is_today = current == today;
+                let key = current.format("%Y-%m-%d").to_string();
+                let total = app.day_totals.get(&key);
+                let active_hours = total.map_or(0.0, |t| t.active_ms as f64 / 3600000.0);
+
+                let cell = format!("{:>3} ", d);
+
+                let style = if is_selected {
+                    match app.cal_focus {
+                        Focus::Calendar => Style::new().fg(Color::White).bold().bg(ROW_SEL),
+                        Focus::Detail => Style::new().fg(ACCENT).bold(),
+                    }
+                } else if is_today {
+                    Style::new().fg(Color::Yellow).bold()
+                } else if active_hours >= 6.0 {
+                    Style::new().fg(CAL_HI).bold()
+                } else if active_hours >= 2.0 {
+                    Style::new().fg(CAL_MED)
+                } else if active_hours > 0.0 {
+                    Style::new().fg(CAL_LOW)
+                } else {
+                    Style::new().fg(DIM)
+                };
+
+                spans.push(Span::styled(cell, style));
+                day += 1;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    frame.render_widget(Paragraph::new(tabs), top[1]);
+            col += 1;
+        }
+        lines.push(Line::from(spans));
+        if day > days_in_month as i32 {
+            break;
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_summary(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let summary_text = match &app.summary {
-        Some(s) => vec![
-            Line::from(format!(" PC on:  {}", format_duration(s.pc_on_ms))),
-            Line::raw(""),
-            Line::from(format!(" Active: {}", format_duration(s.active_ms))),
-            Line::from(format!(" Idle:   {}", format_duration(s.idle_ms))),
-        ],
-        None => vec![Line::from(" No data")],
+fn draw_cal_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let text = match &app.summary {
+        Some(s) => {
+            let ds = app.selected_date().format("%Y-%m-%d %a").to_string();
+            vec![Line::from(vec![
+                Span::styled(" \u{2500} ", Style::new().fg(DIM)),
+                Span::styled(ds, Style::new().fg(ACCENT).bold()),
+                Span::styled(
+                    format!(
+                        " \u{2500}  PC on {}  Active {}  Idle {}",
+                        format_duration(s.pc_on_ms),
+                        format_duration(s.active_ms),
+                        format_duration(s.idle_ms),
+                    ),
+                    Style::new().fg(DIM),
+                ),
+            ])]
+        }
+        None => vec![Line::from(vec![
+            Span::styled(" \u{2500} ", Style::new().fg(DIM)),
+            Span::styled(
+                app.selected_date().format("%Y-%m-%d %a").to_string(),
+                Style::new().fg(ACCENT).bold(),
+            ),
+            Span::styled(" \u{2500}  No data", Style::new().fg(DIM)),
+        ])],
     };
-    frame.render_widget(
-        Paragraph::new(summary_text).block(Block::bordered().title(" Summary ")),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text), area);
 }
 
-fn draw_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+fn draw_cal_table(frame: &mut Frame, area: Rect, app: &App) {
     let active_ms = app.summary.as_ref().map(|s| s.active_ms).unwrap_or(0);
 
     let mut rows: Vec<Row> = Vec::new();
@@ -302,9 +493,171 @@ fn draw_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
         );
 
-        // expanded pages
         if is_expanded {
-            for (pg_idx, p) in app.expanded_pages.iter().enumerate() {
+            for p in &app.expanded_pages {
+                let page_pct = if a.total_ms > 0 {
+                    (p.total_ms as f64 / a.total_ms as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let row_sel = app.selected == rows.len();
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(Span::styled(
+                            format!("  \u{2514} {}", truncate(&clean_page_title(&p.app_class), 30)),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(PAGE_FG)
+                            },
+                        )),
+                        Cell::from(Span::styled(
+                            format_duration(p.total_ms),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(PAGE_FG)
+                            },
+                        )),
+                        Cell::from(Span::styled(
+                            format!("{page_pct:5.1}%"),
+                            if row_sel {
+                                Style::new().fg(Color::White)
+                            } else {
+                                Style::new().fg(DIM)
+                            },
+                        )),
+                    ])
+                    .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+                );
+            }
+        }
+    }
+
+    let widths = [
+        Constraint::Percentage(55),
+        Constraint::Percentage(30),
+        Constraint::Percentage(15),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["App", "Time", "%"])
+                .style(Style::new().add_modifier(Modifier::BOLD)),
+        );
+
+    frame.render_widget(table, area);
+}
+
+fn draw_cal_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let hint = match app.cal_focus {
+        Focus::Calendar => {
+            " \u{2190}\u{2192}\u{2191}\u{2193} day  |  Enter detail  |  1 2 3 view  |  q quit"
+        }
+        Focus::Detail => {
+            " \u{2191}\u{2193} select  |  Enter expand  |  Esc back to calendar  |  q quit"
+        }
+    };
+    frame.render_widget(Paragraph::new(Line::from(hint)), area);
+}
+
+// ── aggregate views (Day / Week / Month) ──
+
+fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
+    let (from, to) = app.date_range();
+    let range_label = match app.mode {
+        ViewMode::Day => from.clone(),
+        ViewMode::Week => {
+            let wn = app.date.iso_week().week();
+            format!("W{wn} ({from} — {to})")
+        }
+        ViewMode::Month => app.date.format("%Y-%m").to_string(),
+        _ => unreachable!(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(" SELFTrack  {range_label} "))).bold(),
+        top[0],
+    );
+    let names = [" Day ", " Week ", " Month ", " Calendar "];
+    let selected = match app.mode {
+        ViewMode::Day => 0,
+        ViewMode::Week => 1,
+        ViewMode::Month => 2,
+        ViewMode::Calendar => 3,
+    };
+    let tabs = names
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if i == selected {
+                format!("\u{25b8}{}\u{25c2}", t.trim())
+            } else {
+                format!(" {} ", t.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    frame.render_widget(Paragraph::new(tabs), top[1]);
+}
+
+fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let summary_text = match &app.summary {
+        Some(s) => vec![
+            Line::from(format!(" PC on:  {}", format_duration(s.pc_on_ms))),
+            Line::raw(""),
+            Line::from(format!(" Active: {}", format_duration(s.active_ms))),
+            Line::from(format!(" Idle:   {}", format_duration(s.idle_ms))),
+        ],
+        None => vec![Line::from(" No data")],
+    };
+    frame.render_widget(
+        Paragraph::new(summary_text).block(Block::bordered().title(" Summary ")),
+        area,
+    );
+}
+
+fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
+    let active_ms = app.summary.as_ref().map(|s| s.active_ms).unwrap_or(0);
+
+    let mut rows: Vec<Row> = Vec::new();
+    for (app_idx, a) in app.app_summaries.iter().enumerate() {
+        let pct = if active_ms > 0 {
+            (a.total_ms as f64 / active_ms as f64) * 100.0
+        } else {
+            0.0
+        };
+        let is_expanded = app.expanded_app == Some(app_idx);
+        let prefix = if is_expanded { "▾ " } else { "▸ " };
+        let row_sel = app.selected == rows.len();
+
+        rows.push(
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("{prefix}{}", a.app_class),
+                    if row_sel {
+                        Style::new().fg(Color::White).bold()
+                    } else {
+                        Style::new().fg(Color::White)
+                    },
+                )),
+                Cell::from(Span::styled(
+                    format_duration(a.total_ms),
+                    if row_sel {
+                        Style::new().fg(Color::White).bold()
+                    } else {
+                        Style::new().fg(Color::White)
+                    },
+                )),
+                Cell::from(Span::styled(
+                    format!("{pct:5.1}%"),
+                    Style::new().fg(Color::White),
+                )),
+            ])
+            .style(if row_sel { Style::new().bg(ROW_SEL) } else { Style::new() }),
+        );
+
+        if is_expanded {
+            for p in &app.expanded_pages {
                 let page_pct = if a.total_ms > 0 {
                     (p.total_ms as f64 / a.total_ms as f64) * 100.0
                 } else {
@@ -359,23 +712,10 @@ fn draw_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     frame.render_widget(table, area);
 }
 
-fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let mode_hint = if app.app_summaries.is_empty() {
-        "".to_string()
-    } else {
-        format!(
-            " {}/{}  ",
-            app.selected + 1,
-            app.row_count()
-        )
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(format!(
-            " {}← → period  |  Tab / 1 2 3 view  |  ↑↓ select  |  Enter expand  |  q quit",
-            mode_hint,
-        ))),
-        area,
-    );
+fn draw_footer(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Paragraph::new(Line::from(
+        " ← → period  |  Tab / 1 2 3 view  |  4 Calendar  |  ↑↓ select  |  Enter expand  |  q quit",
+    )), area);
 }
 
 // ── public entry point ──
@@ -401,95 +741,174 @@ pub fn run(db: db::Database) -> io::Result<()> {
                 }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('1') => {
-                        app.mode = ViewMode::Day;
-                        app.refresh();
-                    }
-                    KeyCode::Char('2') => {
-                        app.mode = ViewMode::Week;
-                        app.refresh();
-                    }
-                    KeyCode::Char('3') => {
-                        app.mode = ViewMode::Month;
-                        app.refresh();
-                    }
+
+                    // ── view switching ──
                     KeyCode::Tab => {
                         app.mode = match app.mode {
                             ViewMode::Day => ViewMode::Week,
                             ViewMode::Week => ViewMode::Month,
-                            ViewMode::Month => ViewMode::Day,
+                            ViewMode::Month => ViewMode::Calendar,
+                            ViewMode::Calendar => ViewMode::Day,
                         };
+                        if app.mode == ViewMode::Calendar {
+                            app.cal_focus = Focus::Calendar;
+                        }
+                        app.date = chrono::Local::now().naive_local().date();
                         app.refresh();
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if app.selected > 0 {
-                            app.selected -= 1;
-                        }
+                    KeyCode::Char('1') => {
+                        app.mode = ViewMode::Day;
+                        app.date = chrono::Local::now().naive_local().date();
+                        app.refresh();
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let max = app.row_count().saturating_sub(1);
-                        if app.selected < max {
-                            app.selected += 1;
-                        }
+                    KeyCode::Char('2') => {
+                        app.mode = ViewMode::Week;
+                        app.date = chrono::Local::now().naive_local().date();
+                        app.refresh();
                     }
-                    KeyCode::Enter => {
-                        if let Some(app_idx) = app.row_to_app_idx(app.selected) {
-                            if app_idx < app.app_summaries.len() {
-                                let prev = app.expanded_app;
-                                app.toggle_expand(app_idx);
-                                // adjust selected if collapsing before current position
-                                if prev.is_some() && app.expanded_app.is_none() {
-                                    let pg_count = app.expanded_pages.len();
-                                    if app.selected > app_idx && app.selected <= app_idx + pg_count {
-                                        app.selected = app_idx + 1;
+                    KeyCode::Char('3') => {
+                        app.mode = ViewMode::Month;
+                        app.date = chrono::Local::now().naive_local().date();
+                        app.refresh();
+                    }
+                    KeyCode::Char('4') => {
+                        app.mode = ViewMode::Calendar;
+                        app.cal_focus = Focus::Calendar;
+                        let today = chrono::Local::now().naive_local().date();
+                        app.cal_month = today.with_day(1).unwrap();
+                        app.cal_day = today.day();
+                        app.refresh_calendar();
+                    }
+
+                    // ── Calendar mode navigation ──
+                    _ if app.mode == ViewMode::Calendar => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => break,
+
+                            KeyCode::Left | KeyCode::Char('h') if app.cal_focus == Focus::Calendar => {
+                                app.move_selection(-1);
+                            }
+                            KeyCode::Right | KeyCode::Char('l') if app.cal_focus == Focus::Calendar => {
+                                app.move_selection(1);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') if app.cal_focus == Focus::Calendar => {
+                                app.move_selection(-7);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') if app.cal_focus == Focus::Calendar => {
+                                app.move_selection(7);
+                            }
+
+                            KeyCode::Enter => {
+                                match app.cal_focus {
+                                    Focus::Calendar => {
+                                        app.cal_focus = Focus::Detail;
+                                        app.selected = 0;
+                                    }
+                                    Focus::Detail => {
+                                        if let Some(app_idx) = app.row_to_app_idx(app.selected) {
+                                            if app_idx < app.app_summaries.len() {
+                                                app.toggle_expand(app_idx);
+                                            }
+                                        }
                                     }
                                 }
                             }
+
+                            KeyCode::Esc => {
+                                app.cal_focus = Focus::Calendar;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') if app.cal_focus == Focus::Detail => {
+                                if app.selected > 0 {
+                                    app.selected -= 1;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') if app.cal_focus == Focus::Detail => {
+                                let max = app.row_count().saturating_sub(1);
+                                if app.selected < max {
+                                    app.selected += 1;
+                                }
+                            }
+
+                            _ => {}
                         }
                     }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        let prev = match app.mode {
-                            ViewMode::Day => app.date.pred_opt().unwrap_or(app.date),
-                            ViewMode::Week => app
-                                .date
-                                .checked_sub_days(chrono::Days::new(7))
-                                .unwrap_or(app.date),
-                            ViewMode::Month => {
-                                let m = if app.date.month() == 1 { 12 } else { app.date.month() - 1 };
-                                let y = if app.date.month() == 1 {
-                                    app.date.year() - 1
-                                } else {
-                                    app.date.year()
-                                };
-                                let d = app.date.day().min(last_day(y, m));
-                                NaiveDate::from_ymd_opt(y, m, d).unwrap_or(app.date)
+
+                    // ── aggregate view navigation (Day / Week / Month) ──
+                    _ => {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if app.selected > 0 {
+                                    app.selected -= 1;
+                                }
                             }
-                        };
-                        app.date = prev;
-                        app.refresh();
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        let next = match app.mode {
-                            ViewMode::Day => app.date.succ_opt().unwrap_or(app.date),
-                            ViewMode::Week => app
-                                .date
-                                .checked_add_days(chrono::Days::new(7))
-                                .unwrap_or(app.date),
-                            ViewMode::Month => {
-                                let m = if app.date.month() == 12 { 1 } else { app.date.month() + 1 };
-                                let y = if app.date.month() == 12 {
-                                    app.date.year() + 1
-                                } else {
-                                    app.date.year()
-                                };
-                                let d = app.date.day().min(last_day(y, m));
-                                NaiveDate::from_ymd_opt(y, m, d).unwrap_or(app.date)
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let max = app.row_count().saturating_sub(1);
+                                if app.selected < max {
+                                    app.selected += 1;
+                                }
                             }
-                        };
-                        app.date = next;
-                        app.refresh();
+                            KeyCode::Enter => {
+                                if let Some(app_idx) = app.row_to_app_idx(app.selected) {
+                                    if app_idx < app.app_summaries.len() {
+                                        let prev = app.expanded_app;
+                                        app.toggle_expand(app_idx);
+                                        if prev.is_some() && app.expanded_app.is_none() {
+                                            if app.selected > app_idx
+                                                && app.selected <= app_idx + app.expanded_pages.len()
+                                            {
+                                                app.selected = app_idx + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                let prev = match app.mode {
+                                    ViewMode::Day => app.date.pred_opt().unwrap_or(app.date),
+                                    ViewMode::Week => app
+                                        .date
+                                        .checked_sub_days(chrono::Days::new(7))
+                                        .unwrap_or(app.date),
+                                    ViewMode::Month => {
+                                        let m = if app.date.month() == 1 { 12 } else { app.date.month() - 1 };
+                                        let y = if app.date.month() == 1 {
+                                            app.date.year() - 1
+                                        } else {
+                                            app.date.year()
+                                        };
+                                        let d = app.date.day().min(last_day_of(y, m));
+                                        NaiveDate::from_ymd_opt(y, m, d).unwrap_or(app.date)
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                app.date = prev;
+                                app.refresh();
+                            }
+                            KeyCode::Right | KeyCode::Char('l') => {
+                                let next = match app.mode {
+                                    ViewMode::Day => app.date.succ_opt().unwrap_or(app.date),
+                                    ViewMode::Week => app
+                                        .date
+                                        .checked_add_days(chrono::Days::new(7))
+                                        .unwrap_or(app.date),
+                                    ViewMode::Month => {
+                                        let m = if app.date.month() == 12 { 1 } else { app.date.month() + 1 };
+                                        let y = if app.date.month() == 12 {
+                                            app.date.year() + 1
+                                        } else {
+                                            app.date.year()
+                                        };
+                                        let d = app.date.day().min(last_day_of(y, m));
+                                        NaiveDate::from_ymd_opt(y, m, d).unwrap_or(app.date)
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                app.date = next;
+                                app.refresh();
+                            }
+                            _ => {}
+                        }
                     }
-                    _ => {}
                 }
             }
         }
@@ -500,27 +919,4 @@ pub fn run(db: db::Database) -> io::Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
-}
-
-fn last_day(year: i32, month: u32) -> u32 {
-    NaiveDate::from_ymd_opt(
-        if month == 12 { year + 1 } else { year },
-        if month == 12 { 1 } else { month + 1 },
-        1,
-    )
-    .unwrap()
-    .pred_opt()
-    .unwrap()
-    .day()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max.saturating_sub(1);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
