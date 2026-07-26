@@ -9,7 +9,6 @@ pub fn print_report(db: &Database, date: &str, app: Option<&str>) {
     match db.get_day_summary(date) {
         Ok(summary) => {
             println!("=== SELFTrack report for {date} ===");
-            println!("PC on:     {}", format_duration(summary.pc_on_ms));
             println!("Active:    {}", format_duration(summary.active_ms));
             println!("Idle:      {}", format_duration(summary.idle_ms));
             println!();

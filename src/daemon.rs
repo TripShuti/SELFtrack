@@ -135,18 +135,6 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
                     SuspendEvent::Resumed { at_ms } => {
                         if is_sleeping {
                             tracing::info!("system resumed from sleep");
-                            let duration_ms = at_ms.saturating_sub(state.session_start_ms);
-                            if duration_ms >= 1000 {
-                                let sleep_session = Session {
-                                    date: today(),
-                                    app_class: "__idle__".into(),
-                                    app_title: String::new(),
-                                    start_ms: state.session_start_ms as i64,
-                                    end_ms: at_ms as i64,
-                                    is_idle: true,
-                                };
-                                let _ = db.insert_session(&sleep_session);
-                            }
                             is_sleeping = false;
                             match hypr::get_active_window() {
                                 Ok(w) => {

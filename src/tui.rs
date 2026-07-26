@@ -37,6 +37,7 @@ struct App {
     expanded_app: Option<usize>,
     expanded_pages: Vec<db::AppSummary>,
     selected: usize,
+    scroll: usize,
 
     db: db::Database,
 }
@@ -59,6 +60,7 @@ impl App {
             expanded_app: None,
             expanded_pages: vec![],
             selected: 0,
+            scroll: 0,
 
             db,
         };
@@ -121,6 +123,7 @@ impl App {
         self.expanded_app = None;
         self.expanded_pages = vec![];
         self.selected = 0;
+        self.scroll = 0;
     }
 
     fn move_selection(&mut self, delta_days: i64) {
@@ -343,10 +346,6 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let week = &app.week_summary;
     let month = &app.month_summary;
 
-    let day_line = match day {
-        Some(s) => format!(" Day    {}", format_duration(s.pc_on_ms)),
-        None => " Day    —".into(),
-    };
     let active_line = match day {
         Some(s) => format!(" Active {}", format_duration(s.active_ms)),
         None => String::new(),
@@ -370,7 +369,6 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let mut text = vec![];
-    text.push(Line::from(day_line));
     if !active_line.is_empty() {
         text.push(Line::from(active_line));
     }
@@ -429,12 +427,19 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    let total_rows = rows.len();
+    let visible = area.height.saturating_sub(3) as usize;
+    let max_scroll = total_rows.saturating_sub(visible);
+    let scroll = app.scroll.min(max_scroll);
+    let end = std::cmp::min(scroll + visible, total_rows);
+    let displayed: Vec<Row> = rows.drain(scroll..end).collect();
+
     let widths = [
         Constraint::Percentage(55),
         Constraint::Percentage(30),
         Constraint::Percentage(15),
     ];
-    let table = Table::new(rows, widths)
+    let table = Table::new(displayed, widths)
         .header(
             Row::new(vec!["App", "Time", "%"])
                 .style(Style::new().add_modifier(Modifier::BOLD)),
@@ -469,8 +474,14 @@ pub fn run(db: db::Database) -> io::Result<()> {
 
     let mut app = App::new(db);
 
+    let mut visible_rows = 1usize;
+
     loop {
         terminal.draw(|f| draw(f, &app))?;
+
+        if let Ok(size) = terminal.size() {
+            visible_rows = (size.height.saturating_sub(14)).max(1) as usize;
+        }
 
         if crossterm::event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
@@ -517,12 +528,18 @@ pub fn run(db: db::Database) -> io::Result<()> {
                     KeyCode::Up | KeyCode::Char('k') if app.focus == Focus::Detail => {
                         if app.selected > 0 {
                             app.selected -= 1;
+                            if app.selected < app.scroll {
+                                app.scroll = app.scroll.saturating_sub(1);
+                            }
                         }
                     }
                     KeyCode::Down | KeyCode::Char('j') if app.focus == Focus::Detail => {
                         let max = app.row_count().saturating_sub(1);
                         if app.selected < max {
                             app.selected += 1;
+                            if app.selected >= app.scroll + visible_rows {
+                                app.scroll += 1;
+                            }
                         }
                     }
 
