@@ -1,3 +1,4 @@
+mod audio;
 mod daemon;
 mod db;
 mod hypr;
