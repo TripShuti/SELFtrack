@@ -27,9 +27,7 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
     let mut is_sleeping = false;
 
     let mut suppress_active = false;
-    let mut suppress_start_ms = 0u64;
-    let mut suppress_capped = false;
-    let mut recheck = tokio::time::interval(std::time::Duration::from_secs(120));
+    let mut recheck = tokio::time::interval(std::time::Duration::from_secs(30));
 
     tracing::info!(
         "tracking started, initial app: {} / {}",
@@ -68,16 +66,12 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
                 match ev {
                     IdleStatus::BecameIdle { at_ms } => {
                         if !is_idle {
-                            let class = state.current_class.to_lowercase();
-                            if audio::is_audio_playing().await && audio::is_media_player(&class) {
+                            if audio::is_audio_playing().await {
                                 suppress_active = true;
-                                suppress_start_ms = at_ms;
-                                suppress_capped = audio::is_browser(&class);
                                 recheck.reset();
                                 tracing::info!(
-                                    "suppressing idle — {} is playing audio{}",
-                                    state.current_class,
-                                    if suppress_capped { " (capped 30m)" } else { "" }
+                                    "suppressing idle — {} is playing audio",
+                                    state.current_class
                                 );
                                 continue;
                             }
@@ -154,17 +148,9 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
                 }
             }
             _ = recheck.tick() => {
-                if !suppress_active {
-                    continue;
-                }
-                let now = idle::current_time_ms();
-                let audio_ok = audio::is_audio_playing().await;
-                let duration_ms = now.saturating_sub(suppress_start_ms);
-                if !audio_ok || (suppress_capped && duration_ms >= 30 * 60 * 1000) {
-                    tracing::info!(
-                        "ending suppressed idle — {}",
-                        if !audio_ok { "audio stopped" } else { "browser cap (30m) reached" }
-                    );
+                if suppress_active && !audio::is_audio_playing().await {
+                    let now = idle::current_time_ms();
+                    tracing::info!("ending suppressed idle — audio stopped");
                     finalize_session(&db, &state, now, false);
                     is_idle = true;
                     state.session_start_ms = now;
