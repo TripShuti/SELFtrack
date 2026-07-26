@@ -3,6 +3,7 @@ mod db;
 mod hypr;
 mod idle;
 mod report;
+mod suspend;
 mod tui;
 
 use clap::{Parser, Subcommand};

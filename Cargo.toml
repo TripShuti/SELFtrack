@@ -13,6 +13,7 @@ serde_json = "1"
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 zbus = "5"
+futures-util = "0.3"
 hyprland = "0.3"
 dirs = "6"
 tracing = "0.1"

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::db::{Database, Session};
 use crate::hypr::{self, HyprEvent};
 use crate::idle::{self, IdleStatus};
+use crate::suspend::SuspendEvent;
 use tokio::sync::mpsc;
 
 struct TrackerState {
@@ -14,12 +15,15 @@ struct TrackerState {
 pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
     let (hypr_tx, mut hypr_rx) = mpsc::channel::<HyprEvent>(64);
     let (idle_tx, mut idle_rx) = mpsc::channel::<IdleStatus>(64);
+    let (suspend_tx, mut suspend_rx) = mpsc::channel::<SuspendEvent>(64);
 
     idle::spawn_idle_poller(idle_threshold_min, idle_tx);
     hypr::spawn_event_listener(hypr_tx);
+    crate::suspend::spawn_suspend_listener(suspend_tx);
 
     let mut state = get_initial_state();
     let mut is_idle = false;
+    let mut is_sleeping = false;
 
     tracing::info!(
         "tracking started, initial app: {} / {}",
@@ -32,22 +36,25 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
             Some(ev) = hypr_rx.recv() => {
                 match ev {
                     HyprEvent::ActiveWindow { class, title } => {
+                        if is_idle || is_sleeping {
+                            continue;
+                        }
                         tracing::info!("activewindow: {class} / {title}");
                         let now = idle::current_time_ms();
-                        finalize_session(&db, &state, now, is_idle);
+                        finalize_session(&db, &state, now, false);
                         state = TrackerState {
                             current_class: class,
                             current_title: title,
                             session_start_ms: now,
                         };
-                        if is_idle {
-                            is_idle = false;
-                        }
                     }
                     HyprEvent::Other(_) => {}
                 }
             }
             Some(ev) = idle_rx.recv() => {
+                if is_sleeping {
+                    continue;
+                }
                 match ev {
                     IdleStatus::BecameIdle { at_ms } => {
                         if !is_idle {
@@ -70,6 +77,50 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
                             };
                             let _ = db.insert_session(&idle_session);
                             is_idle = false;
+                            match hypr::get_active_window() {
+                                Ok(w) => {
+                                    state = TrackerState {
+                                        current_class: w.class,
+                                        current_title: w.title,
+                                        session_start_ms: at_ms,
+                                    };
+                                }
+                                Err(e) => {
+                                    tracing::warn!("could not get active window: {e}");
+                                    state.session_start_ms = at_ms;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(ev) = suspend_rx.recv() => {
+                match ev {
+                    SuspendEvent::GoingToSleep { at_ms } => {
+                        tracing::info!("system going to sleep");
+                        if !is_idle {
+                            finalize_session(&db, &state, at_ms, false);
+                            state.session_start_ms = at_ms;
+                        }
+                        is_sleeping = true;
+                        is_idle = false;
+                    }
+                    SuspendEvent::Resumed { at_ms } => {
+                        if is_sleeping {
+                            tracing::info!("system resumed from sleep");
+                            let duration_ms = at_ms.saturating_sub(state.session_start_ms);
+                            if duration_ms >= 1000 {
+                                let sleep_session = Session {
+                                    date: today(),
+                                    app_class: "__idle__".into(),
+                                    app_title: String::new(),
+                                    start_ms: state.session_start_ms as i64,
+                                    end_ms: at_ms as i64,
+                                    is_idle: true,
+                                };
+                                let _ = db.insert_session(&sleep_session);
+                            }
+                            is_sleeping = false;
                             match hypr::get_active_window() {
                                 Ok(w) => {
                                     state = TrackerState {

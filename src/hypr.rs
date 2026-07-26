@@ -105,6 +105,7 @@ fn parse_event(line: &str) -> Option<HyprEvent> {
     match tag {
         "activewindow" => {
             let (cls, title) = rest.split_once(',').unwrap_or((rest, ""));
+            let cls = if cls.is_empty() { "unknown" } else { cls };
             Some(HyprEvent::ActiveWindow {
                 class: cls.to_string(),
                 title: title.to_string(),
