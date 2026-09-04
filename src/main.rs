@@ -1,6 +1,7 @@
 mod audio;
 mod daemon;
 mod db;
+mod export;
 mod hypr;
 mod idle;
 mod report;
@@ -23,6 +24,8 @@ enum Commands {
     Daemon {
         #[arg(long, default_value = "5")]
         idle_threshold: u64,
+        #[arg(long, default_value = "60")]
+        retention_days: u64,
     },
     Report {
         #[arg(short, long)]
@@ -34,6 +37,12 @@ enum Commands {
     Timeline {
         #[arg(short, long)]
         date: Option<String>,
+    },
+    Export {
+        #[arg(short, long)]
+        date: Option<String>,
+        #[arg(short, long)]
+        app: Option<String>,
     },
     Tui,
 }
@@ -60,13 +69,13 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon { idle_threshold } => {
+        Commands::Daemon { idle_threshold, retention_days } => {
             let path = db_path();
             tracing::info!("database: {}", path.display());
             let db = Arc::new(
                 db::Database::open(&path).expect("failed to open database"),
             );
-            daemon::run(db, idle_threshold).await;
+            daemon::run(db, idle_threshold, retention_days).await;
         }
         Commands::Report { date, app } => {
             let date = date.unwrap_or_else(today);
@@ -85,6 +94,12 @@ async fn main() {
             let path = db_path();
             let db = db::Database::open(&path).expect("failed to open database");
             report::print_timeline(&db, &date);
+        }
+        Commands::Export { date, app } => {
+            let date = date.unwrap_or_else(today);
+            let path = db_path();
+            let db = db::Database::open(&path).expect("failed to open database");
+            export::run(&db, &date, app.as_deref());
         }
         Commands::Tui => {
             let path = db_path();

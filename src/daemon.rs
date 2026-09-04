@@ -13,7 +13,7 @@ struct TrackerState {
     session_start_ms: u64,
 }
 
-pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
+pub async fn run(db: Arc<Database>, idle_threshold_min: u64, retention_days: u64) {
     let (hypr_tx, mut hypr_rx) = mpsc::channel::<HyprEvent>(64);
     let (idle_tx, mut idle_rx) = mpsc::channel::<IdleStatus>(64);
     let (suspend_tx, mut suspend_rx) = mpsc::channel::<SuspendEvent>(64);
@@ -28,6 +28,9 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
 
     let mut suppress_active = false;
     let mut recheck = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut flush = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut last_prune_date = today();
+    prune(&db, retention_days);
 
     tracing::info!(
         "tracking started, initial app: {} / {}",
@@ -157,6 +160,24 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64) {
                     suppress_active = false;
                 }
             }
+            _ = flush.tick() => {
+                // Живий флашу: без цього відкрита сесія лежить тільки в RAM
+                // і віджет/export бачать заморожені дані до перемикання вікна.
+                // Спліт — фіналізуємо шматок і одразу починаємо новий з тими
+                // ж class/title. Один INSERT/хв навантаження не дає.
+                if !is_idle && !is_sleeping {
+                    let now = idle::current_time_ms();
+                    finalize_session(&db, &state, now, false);
+                    state.session_start_ms = now;
+                }
+                // Демон живе тижнями без рестартів, тому автопрун —
+                // не частіше разу на добу, а не тільки на старті
+                let day = today();
+                if day != last_prune_date {
+                    last_prune_date = day;
+                    prune(&db, retention_days);
+                }
+            }
         }
     }
 }
@@ -203,4 +224,28 @@ fn finalize_session(db: &Database, state: &TrackerState, end_ms: u64, was_idle: 
 
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn prune(db: &Database, retention_days: u64) {
+    if retention_days == 0 {
+        return;
+    }
+    let cutoff = chrono::Local::now()
+        .naive_local()
+        .date()
+        .checked_sub_days(chrono::Days::new(retention_days))
+        .map(|d| d.format("%Y-%m-%d").to_string());
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    match db.delete_sessions_older_than(&cutoff) {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!("pruned {n} sessions older than {cutoff}");
+            if let Err(e) = db.vacuum() {
+                tracing::warn!("vacuum failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("prune failed: {e}"),
+    }
 }

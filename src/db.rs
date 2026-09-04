@@ -241,4 +241,16 @@ impl Database {
         conn.execute("DELETE FROM sessions WHERE date = ?1", params![date])?;
         Ok(())
     }
+
+    pub fn delete_sessions_older_than(&self, cutoff: &str) -> Result<usize, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM sessions WHERE date < ?1", params![cutoff])?;
+        Ok(n)
+    }
+
+    pub fn vacuum(&self) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
 }
