@@ -14,7 +14,58 @@ pub async fn playing_streams() -> Vec<String> {
         return vec![];
     }
     let text = String::from_utf8_lossy(&o.stdout);
-    audible_streams(&text)
+    let candidates = audible_streams(&text);
+    if candidates.is_empty() {
+        return vec![];
+    }
+    // Деякі плеєри (ALSA-бридж) не коркають стрім на паузі: PipeWire каже
+    // "грає", MPRIS каже "Paused". Довіряємо MPRIS — поставлений на паузу
+    // плеєр idle не глушить. Невдача запиту = старе поводження (глушити).
+    let paused = paused_mpris_players().await;
+    candidates
+        .into_iter()
+        .filter(|app| !is_paused_app(app, &paused))
+        .collect()
+}
+
+// Чи належить стрім застосунку з призупиненим MPRIS-плеєром.
+// Зіставлення нечітке: "PipeWire ALSA [selfsonic]" <-> "selfsonic",
+// "Chromium" <-> "chromium.instance1809".
+fn is_paused_app(app: &str, paused: &[String]) -> bool {
+    let a = app.to_lowercase();
+    paused.iter().any(|p| a.contains(p) || p.contains(&a))
+}
+
+async fn paused_mpris_players() -> Vec<String> {
+    let query = async {
+        let conn = zbus::Connection::session().await?;
+        let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+        let names = dbus.list_names().await?;
+        let mut paused = vec![];
+        for name in names {
+            let s = name.to_string();
+            let Some(identity) = s.strip_prefix("org.mpris.MediaPlayer2.") else {
+                continue;
+            };
+            let proxy = zbus::Proxy::new(
+                &conn,
+                name.clone(),
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2.Player",
+            )
+            .await?;
+            let status: String = proxy.get_property("PlaybackStatus").await.unwrap_or_default();
+            if status == "Paused" || status == "Stopped" {
+                paused.push(identity.to_lowercase());
+            }
+        }
+        Ok::<_, zbus::Error>(paused)
+    };
+    // Завислий плеєр не повинен стопити idle-обробку: таймаут -> глушимо як раніше
+    match tokio::time::timeout(std::time::Duration::from_secs(3), query).await {
+        Ok(Ok(paused)) => paused,
+        _ => vec![],
+    }
 }
 
 // Шукає стріми що реально звучать. Стара перевірка ("short непорожній")
@@ -143,5 +194,14 @@ mod tests {
     #[test]
     fn empty_list_is_silence() {
         assert!(audible_streams("").is_empty());
+    }
+
+    #[test]
+    fn paused_mpris_app_is_excluded() {
+        let paused = vec!["selfsonic".to_string(), "chromium.instance1809".to_string()];
+        assert!(is_paused_app("PipeWire ALSA [selfsonic]", &paused));
+        assert!(is_paused_app("Chromium", &paused));
+        assert!(!is_paused_app("mpv", &paused));
+        assert!(!is_paused_app("Firefox", &[]));
     }
 }
