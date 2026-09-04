@@ -5,7 +5,9 @@ Focus-based time tracker for Hyprland. Logs active application time per day usin
 ## Features
 
 - Tracks focused window (class + title) via Hyprland socket
-- Idle detection with configurable threshold (default 5 min)
+- Idle detection with configurable threshold (default 5 min); idle is
+  suppressed only while audio is actually playing (running, unmuted,
+  non-virtual streams — paused players and the EQ loopback don't count)
 - Per-page breakdown for browsers (tracks tab titles)
 - Stores sessions in SQLite (`~/.local/share/selftrack/track.db`)
 - TUI: calendar view with day/week/month totals + expandable app pages

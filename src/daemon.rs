@@ -69,11 +69,13 @@ pub async fn run(db: Arc<Database>, idle_threshold_min: u64, retention_days: u64
                 match ev {
                     IdleStatus::BecameIdle { at_ms } => {
                         if !is_idle {
-                            if audio::is_audio_playing().await {
+                            let playing = audio::playing_streams().await;
+                            if !playing.is_empty() {
                                 suppress_active = true;
                                 recheck.reset();
                                 tracing::info!(
-                                    "suppressing idle — {} is playing audio",
+                                    "suppressing idle — audio playing: {} (in {})",
+                                    playing.join(", "),
                                     state.current_class
                                 );
                                 continue;

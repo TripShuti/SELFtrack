@@ -28,11 +28,25 @@ pub fn spawn_idle_poller(threshold_min: u64, tx: mpsc::Sender<IdleStatus>) {
     let timeout_ms = (threshold_min * 60 * 1000) as u32;
 
     thread::spawn(move || {
+        // Цикл перепідключення як у hypr.rs: раніше перша ж помилка
+        // dispatch вбивала тред назавжди і idle не ловився до рестарту демона
+        loop {
+            if run_poller(timeout_ms, &tx) {
+                return;
+            }
+            tracing::warn!("idle poller stopped, reconnecting in 5s");
+            thread::sleep(std::time::Duration::from_secs(5));
+        }
+    });
+}
+
+// true — чисте завершення (канал закрито, виходимо), false — ретраїти
+fn run_poller(timeout_ms: u32, tx: &mpsc::Sender<IdleStatus>) -> bool {
         let conn = match Connection::connect_to_env() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("wayland connection failed: {e}, idle disabled");
-                return;
+                tracing::warn!("wayland connection failed: {e}, retrying");
+                return false;
             }
         };
 
@@ -41,7 +55,7 @@ pub fn spawn_idle_poller(threshold_min: u64, tx: mpsc::Sender<IdleStatus>) {
         let display = conn.display();
 
         let mut state = WlState {
-            tx,
+            tx: tx.clone(),
             seat: None,
             notifier: None,
             notification: None,
@@ -51,19 +65,18 @@ pub fn spawn_idle_poller(threshold_min: u64, tx: mpsc::Sender<IdleStatus>) {
         display.get_registry(&qh, ());
 
         if event_queue.roundtrip(&mut state).is_err() {
-            tracing::warn!("wayland roundtrip failed, idle disabled");
-            return;
+            tracing::warn!("wayland roundtrip failed, retrying");
+            return false;
         }
 
         tracing::info!("wayland idle notification active");
 
         loop {
             if event_queue.blocking_dispatch(&mut state).is_err() {
-                tracing::warn!("wayland dispatch error, idle stopped");
-                break;
+                tracing::warn!("wayland dispatch error, reconnecting");
+                return false;
             }
         }
-    });
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for WlState {
