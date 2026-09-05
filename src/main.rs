@@ -6,6 +6,7 @@ mod hypr;
 mod idle;
 mod report;
 mod suspend;
+#[cfg(feature = "tui")]
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -44,6 +45,7 @@ enum Commands {
         #[arg(short, long)]
         app: Option<String>,
     },
+    #[cfg(feature = "tui")]
     Tui,
 }
 
@@ -101,6 +103,7 @@ async fn main() {
             let db = db::Database::open(&path).expect("failed to open database");
             export::run(&db, &date, app.as_deref());
         }
+        #[cfg(feature = "tui")]
         Commands::Tui => {
             let path = db_path();
             let db = db::Database::open(&path).expect("failed to open database");

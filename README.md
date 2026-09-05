@@ -28,6 +28,12 @@ Or directly:
 cargo install --git https://github.com/TripShuti/SELFtrack
 ```
 
+Daemon-only build without the TUI (drops ratatui/crossterm):
+
+```bash
+cargo install --no-default-features --git https://github.com/TripShuti/SELFtrack
+```
+
 ## Usage
 
 ```bash
