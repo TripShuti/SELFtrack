@@ -357,13 +357,13 @@ fn draw_summary(frame: &mut Frame, area: Rect, app: &App) {
     let week_line = match week {
         Some(s) => {
             let wn = app.selected_date().iso_week().week();
-            format!(" Week   {}  (W{wn})", format_duration(s.pc_on_ms))
+            format!(" Week   {}  (W{wn})", format_duration(s.active_ms))
         }
         None => " Week   —".into(),
     };
     let month_line = match month {
         Some(s) => {
-            format!(" Month  {}  ({})", format_duration(s.pc_on_ms), app.selected_date().format("%Y-%m"))
+            format!(" Month  {}  ({})", format_duration(s.active_ms), app.selected_date().format("%Y-%m"))
         }
         None => " Month  —".into(),
     };
