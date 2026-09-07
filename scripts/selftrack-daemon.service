@@ -1,11 +1,16 @@
 [Unit]
 Description=SELFTrack daemon — focus-based time tracker for Hyprland
-After=graphical-session.target
+# Стартувати ПІСЛЯ графічної сесії (uwsm finalize вже імпортував
+# WAYLAND_DISPLAY / HYPRLAND_INSTANCE_SIGNATURE в менеджер).
+# Старий WantedBy=default.target стартував до композитора — env
+# процесу був заморожений без цих змінних і idle/hypr ретраїлись вічно.
+After=graphical-session.target wayland-session@hyprland.desktop.target
+PartOf=graphical-session.target
 
 [Service]
 ExecStart=%h/.cargo/bin/selftrack daemon
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

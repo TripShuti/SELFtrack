@@ -5,6 +5,7 @@ mod export;
 mod hypr;
 mod idle;
 mod report;
+mod session;
 mod suspend;
 #[cfg(feature = "tui")]
 mod tui;

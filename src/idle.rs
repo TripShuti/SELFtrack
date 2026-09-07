@@ -1,3 +1,4 @@
+use std::os::unix::net::UnixStream;
 use std::thread;
 use tokio::sync::mpsc;
 use wayland_client::{
@@ -28,24 +29,70 @@ pub fn spawn_idle_poller(threshold_min: u64, tx: mpsc::Sender<IdleStatus>) {
     let timeout_ms = (threshold_min * 60 * 1000) as u32;
 
     thread::spawn(move || {
-        // Цикл перепідключення як у hypr.rs: раніше перша ж помилка
-        // dispatch вбивала тред назавжди і idle не ловився до рестарту демона
+        // Цикл перепідключення: раніше перша ж помилка dispatch
+        // вбивала тред назавжди. Тепер ретраїмо з бекоффом, а щоб не
+        // спамити журнал (було по 2 рядки кожні 5с годинами) —
+        // варнінг тільки на перших спробах і далі раз на ~3 хв.
+        let mut failures: u64 = 0;
         loop {
+            if tx.is_closed() {
+                return;
+            }
             if run_poller(timeout_ms, &tx) {
                 return;
             }
-            tracing::warn!("idle poller stopped, reconnecting in 5s");
-            thread::sleep(std::time::Duration::from_secs(5));
+            failures += 1;
+            let sleep_s = match failures {
+                1..=3 => 5,
+                4..=6 => 15,
+                _ => 30,
+            };
+            if failures <= 3 || failures % 6 == 1 {
+                tracing::warn!(
+                    "idle poller stopped (attempt {failures}), reconnecting in {sleep_s}s"
+                );
+            } else {
+                tracing::debug!(
+                    "idle poller stopped (attempt {failures}), reconnecting in {sleep_s}s"
+                );
+            }
+            thread::sleep(std::time::Duration::from_secs(sleep_s));
         }
     });
 }
 
+fn connect_wayland() -> Result<Connection, String> {
+    // Швидкий шлях — через env.
+    if let Ok(c) = Connection::connect_to_env() {
+        return Ok(c);
+    }
+    // Повільний шлях — скан /run/user/*/wayland-*.
+    // Важливо для випадку раннього старту systemd-юніта, коли в env
+    // процесу WAYLAND_DISPLAY ще нема (env заморожений на момент exec),
+    // а також якщо композитор перестворив сокет.
+    let mut last_err = "connect_to_env failed".to_string();
+    for path in crate::session::wayland_socket_candidates() {
+        match UnixStream::connect(&path) {
+            Ok(stream) => match Connection::from_socket(stream) {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    last_err = format!("{}: backend error: {e}", path.display());
+                }
+            },
+            Err(e) => {
+                last_err = format!("{}: {e}", path.display());
+            }
+        }
+    }
+    Err(last_err)
+}
+
 // true — чисте завершення (канал закрито, виходимо), false — ретраїти
 fn run_poller(timeout_ms: u32, tx: &mpsc::Sender<IdleStatus>) -> bool {
-        let conn = match Connection::connect_to_env() {
+        let conn = match connect_wayland() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("wayland connection failed: {e}, retrying");
+                tracing::debug!("wayland connection failed: {e}");
                 return false;
             }
         };
@@ -65,15 +112,30 @@ fn run_poller(timeout_ms: u32, tx: &mpsc::Sender<IdleStatus>) -> bool {
         display.get_registry(&qh, ());
 
         if event_queue.roundtrip(&mut state).is_err() {
-            tracing::warn!("wayland roundtrip failed, retrying");
+            tracing::debug!("wayland roundtrip failed, retrying");
+            return false;
+        }
+
+        // Композитор може не мати ext_idle_notifier_v1 (або seat ще не
+        // прийшов). Без цього idle-подій не буде ніколи — мовчки висіти
+        // в dispatch не можна, треба ретраїти.
+        if state.seat.is_none() || state.notifier.is_none() {
+            tracing::debug!(
+                "wayland idle protocol unavailable (seat: {}, notifier: {}), retrying",
+                state.seat.is_some(),
+                state.notifier.is_some(),
+            );
             return false;
         }
 
         tracing::info!("wayland idle notification active");
 
         loop {
+            if tx.is_closed() {
+                return true;
+            }
             if event_queue.blocking_dispatch(&mut state).is_err() {
-                tracing::warn!("wayland dispatch error, reconnecting");
+                tracing::debug!("wayland dispatch error, reconnecting");
                 return false;
             }
         }

@@ -93,6 +93,19 @@ systemctl --user enable --now selftrack-daemon
 
 Edit `ExecStart` in the service file if the binary path differs (default: `~/.cargo/bin/selftrack`).
 
+> Migration from `WantedBy=default.target`: the daemon must start
+> **after** `graphical-session.target`, otherwise its process env
+> freezes without `WAYLAND_DISPLAY` / `HYPRLAND_INSTANCE_SIGNATURE`
+> and idle/Hyprland tracking never connects until a manual restart.
+> Re-apply the unit and re-enable:
+> ```bash
+> cp scripts/selftrack-daemon.service ~/.config/systemd/user/
+> systemctl --user daemon-reload
+> systemctl --user disable --now selftrack-daemon
+> systemctl --user enable --now selftrack-daemon
+> ```
+> `reload` is not supported (no `ExecReload=`) — use `restart`.
+
 ## Data
 
 Stored in `~/.local/share/selftrack/track.db` (SQLite). Each session records:
